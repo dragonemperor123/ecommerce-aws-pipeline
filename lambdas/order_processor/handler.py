@@ -27,11 +27,15 @@ ORDER_EVENTS_TOPIC_ARN = os.environ["ORDER_EVENTS_TOPIC_ARN"]
 
 orders_table = dynamodb.Table(ORDERS_TABLE)
 
-# Simple rule-based fraud thresholds (SageMaker model handles deep scoring)
+# Simple rule-based fraud thresholds (SageMaker model handles deep scoring).
+# Calibrated for Olist/Brazilian e-commerce data:
+# - bank_transfer = boleto, a standard Brazilian payment — NOT suspicious
+# - high_value threshold at 95th percentile of Olist order values (~R$500)
+# - bronze threshold at ~75th percentile for low-tier customers
 FRAUD_RULES = {
-    "high_value_threshold": 800,
-    "suspicious_payment": {"crypto", "bank_transfer"},
-    "bronze_threshold": 300,
+    "high_value_threshold": 500,
+    "suspicious_payment": {"crypto"},
+    "bronze_threshold": 200,
 }
 
 
@@ -138,13 +142,14 @@ def lambda_handler(event, context):
     failed_item_ids = []
 
     for record in records:
+        seq = record["kinesis"]["sequenceNumber"]
         try:
-            payload = json.loads(base64.b64decode(record["kinesis"]["data"]).decode("utf-8"))
+            payload = json.loads(base64.b64decode(record["kinesis"]["data"]).decode())
             process_order(payload)
             success += 1
         except Exception as e:
-            log.error("Failed to process record %s: %s", record["kinesis"]["sequenceNumber"], e)
-            failed_item_ids.append({"itemIdentifier": record["kinesis"]["sequenceNumber"]})
+            log.error("Failed to process record %s: %s", seq, e)
+            failed_item_ids.append({"itemIdentifier": seq})
 
     log.info("Processed %d/%d order records", success, len(records))
 

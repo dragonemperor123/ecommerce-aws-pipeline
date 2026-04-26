@@ -29,23 +29,26 @@ CRITICAL_STOCK_THRESHOLD = 3
 
 
 def process_inventory_event(event: dict) -> None:
-    product_id = event["product_id"]
+    product_id  = event["product_id"]
     current_stock = event["current_stock"]
+    # Olist events use real seller_id as warehouse_id; product_name not available
+    category    = event.get("category", "unknown")
+    warehouse   = event.get("warehouse_id", "unknown")
 
-    # Update product table
+    # Update product table with latest stock and category
     try:
         products_table.update_item(
             Key={"product_id": product_id},
             UpdateExpression=(
                 "SET stock_level = :s, last_updated = :t, "
-                "product_name = if_not_exists(product_name, :n), "
-                "category = if_not_exists(category, :c)"
+                "category = if_not_exists(category, :c), "
+                "warehouse_id = :w"
             ),
             ExpressionAttributeValues={
                 ":s": current_stock,
                 ":t": datetime.now(timezone.utc).isoformat(),
-                ":n": event.get("product_name", "Unknown"),
-                ":c": event.get("category", "Unknown"),
+                ":c": category,
+                ":w": warehouse,
             },
         )
     except ClientError as e:
@@ -58,23 +61,23 @@ def process_inventory_event(event: dict) -> None:
             sns.publish(
                 TopicArn=LOW_INVENTORY_TOPIC_ARN,
                 Message=json.dumps({
-                    "product_id": product_id,
-                    "product_name": event.get("product_name"),
-                    "category": event.get("category"),
+                    "product_id":   product_id,
+                    "category":     category,
                     "current_stock": current_stock,
-                    "severity": severity,
-                    "warehouse_id": event.get("warehouse_id"),
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "delta":        event.get("delta"),
+                    "severity":     severity,
+                    "warehouse_id": warehouse,
+                    "timestamp":    datetime.now(timezone.utc).isoformat(),
                 }),
-                Subject=f"Low Inventory Alert [{severity}]: {event.get('product_name', product_id)}",
+                Subject=f"Low Inventory [{severity}] — {category} / {product_id}",
                 MessageAttributes={
                     "severity": {"DataType": "String", "StringValue": severity},
-                    "category": {"DataType": "String", "StringValue": event.get("category", "Unknown")},
+                    "category": {"DataType": "String", "StringValue": category},
                 },
             )
             log.warning(
-                "LOW STOCK [%s]: product=%s stock=%d warehouse=%s",
-                severity, product_id, current_stock, event.get("warehouse_id"),
+                "LOW STOCK [%s]: product=%s category=%s stock=%d warehouse=%s",
+                severity, product_id, category, current_stock, warehouse,
             )
         except ClientError as e:
             log.error("Failed to publish inventory alert: %s", e)
@@ -86,13 +89,14 @@ def lambda_handler(event, context):
     failed_item_ids = []
 
     for record in records:
+        seq = record["kinesis"]["sequenceNumber"]
         try:
-            payload = json.loads(base64.b64decode(record["kinesis"]["data"]).decode("utf-8"))
+            payload = json.loads(base64.b64decode(record["kinesis"]["data"]).decode())
             process_inventory_event(payload)
             success += 1
         except Exception as e:
-            log.error("Failed to process inventory record %s: %s", record["kinesis"]["sequenceNumber"], e)
-            failed_item_ids.append({"itemIdentifier": record["kinesis"]["sequenceNumber"]})
+            log.error("Failed to process inventory record %s: %s", seq, e)
+            failed_item_ids.append({"itemIdentifier": seq})
 
     log.info("Processed %d/%d inventory records", success, len(records))
 

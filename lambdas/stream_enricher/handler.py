@@ -93,14 +93,15 @@ def lambda_handler(event, context):
     failed_item_ids = []
 
     for record in records:
+        seq = record["kinesis"]["sequenceNumber"]
         try:
-            payload = json.loads(base64.b64decode(record["kinesis"]["data"]).decode("utf-8"))
+            payload = json.loads(base64.b64decode(record["kinesis"]["data"]).decode())
             enriched_event = enrich_event(payload)
             update_session(payload["session_id"], payload)
             enriched.append(enriched_event)
         except Exception as e:
-            log.error("Failed to enrich record %s: %s", record["kinesis"]["sequenceNumber"], e)
-            failed_item_ids.append({"itemIdentifier": record["kinesis"]["sequenceNumber"]})
+            log.error("Failed to enrich record %s: %s", seq, e)
+            failed_item_ids.append({"itemIdentifier": seq})
 
     flush_to_s3(enriched)
     log.info("Enriched %d/%d click records", len(enriched), len(records))
