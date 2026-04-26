@@ -2,6 +2,7 @@ from aws_cdk import (
     Stack,
     RemovalPolicy,
     Duration,
+    CfnOutput,
     aws_s3 as s3,
     aws_dynamodb as dynamodb,
 )
@@ -91,3 +92,11 @@ class StorageStack(Stack):
             removal_policy=RemovalPolicy.RETAIN,
             time_to_live_attribute="expires_at",
         )
+
+        # ── Stack Outputs (consumed by deploy.sh and the analytics notebook) ──
+        CfnOutput(self, "RawBucketName",       value=self.raw_bucket.bucket_name)
+        CfnOutput(self, "ProcessedBucketName", value=self.processed_bucket.bucket_name)
+        CfnOutput(self, "CuratedBucketName",   value=self.curated_bucket.bucket_name)
+        CfnOutput(self, "ModelBucketName",     value=self.model_bucket.bucket_name)
+        CfnOutput(self, "OrdersTableName",     value=self.orders_table.table_name)
+        CfnOutput(self, "ProductsTableName",   value=self.products_table.table_name)

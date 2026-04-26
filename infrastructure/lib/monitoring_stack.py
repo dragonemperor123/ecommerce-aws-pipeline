@@ -23,20 +23,21 @@ class MonitoringStack(Stack):
 
         ops_topic = sns.Topic(self, "OpsTopic", topic_name="ecom-ops-alerts")
 
-        # ── Kinesis Metrics ───────────────────────────────────────────────────
-        orders_iterator_age = cw.Metric(
-            namespace="AWS/Kinesis",
-            metric_name="GetRecords.IteratorAgeMilliseconds",
-            dimensions_map={"StreamName": "ecom-orders-stream"},
+        # ── SQS Queue Depth Metrics ───────────────────────────────────────────
+        orders_queue_depth = cw.Metric(
+            namespace="AWS/SQS",
+            metric_name="ApproximateNumberOfMessagesVisible",
+            dimensions_map={"QueueName": ingestion_stack.orders_queue.queue_name},
             statistic="Maximum",
             period=Duration.minutes(1),
         )
 
         # ── Lambda Error Alarms ───────────────────────────────────────────────
         for fn_name, fn in [
-            ("OrderProcessor", processing_stack.order_processor),
-            ("StreamEnricher", processing_stack.stream_enricher),
-            ("FraudDetector", processing_stack.fraud_detector),
+            ("OrderProcessor",    processing_stack.order_processor),
+            ("StreamEnricher",    processing_stack.stream_enricher),
+            ("FraudDetector",     processing_stack.fraud_detector),
+            ("InventoryAlerter",  processing_stack.inventory_alerter),
         ]:
             alarm = cw.Alarm(
                 self, f"{fn_name}ErrorAlarm",
@@ -50,15 +51,15 @@ class MonitoringStack(Stack):
             )
             alarm.add_alarm_action(cw_actions.SnsAction(ops_topic))
 
-        # ── Iterator Age Alarm (pipeline falling behind) ─────────────────────
+        # ── Queue Depth Alarm (pipeline falling behind) ───────────────────────
         lag_alarm = cw.Alarm(
-            self, "OrderStreamLagAlarm",
-            alarm_name="ecom-orders-stream-lag",
-            metric=orders_iterator_age,
-            threshold=60_000,  # 60 seconds
+            self, "OrderQueueDepthAlarm",
+            alarm_name="ecom-orders-queue-depth",
+            metric=orders_queue_depth,
+            threshold=1000,
             evaluation_periods=3,
             comparison_operator=cw.ComparisonOperator.GREATER_THAN_THRESHOLD,
-            alarm_description="Orders stream consumer is lagging > 60 seconds",
+            alarm_description="Orders queue depth > 1000 messages — consumer may be lagging",
             treat_missing_data=cw.TreatMissingData.NOT_BREACHING,
         )
         lag_alarm.add_alarm_action(cw_actions.SnsAction(ops_topic))
@@ -71,8 +72,8 @@ class MonitoringStack(Stack):
 
         self.dashboard.add_widgets(
             cw.GraphWidget(
-                title="Orders Stream — Iterator Age (ms)",
-                left=[orders_iterator_age],
+                title="Orders Queue Depth (messages)",
+                left=[orders_queue_depth],
                 width=12,
             ),
             cw.GraphWidget(
@@ -81,6 +82,7 @@ class MonitoringStack(Stack):
                     processing_stack.order_processor.metric_invocations(period=Duration.minutes(1)),
                     processing_stack.stream_enricher.metric_invocations(period=Duration.minutes(1)),
                     processing_stack.fraud_detector.metric_invocations(period=Duration.minutes(1)),
+                    processing_stack.inventory_alerter.metric_invocations(period=Duration.minutes(1)),
                 ],
                 width=12,
             ),
@@ -90,6 +92,7 @@ class MonitoringStack(Stack):
                     processing_stack.order_processor.metric_errors(period=Duration.minutes(5)),
                     processing_stack.stream_enricher.metric_errors(period=Duration.minutes(5)),
                     processing_stack.fraud_detector.metric_errors(period=Duration.minutes(5)),
+                    processing_stack.inventory_alerter.metric_errors(period=Duration.minutes(5)),
                 ],
                 width=12,
             ),
@@ -98,6 +101,8 @@ class MonitoringStack(Stack):
                 left=[
                     processing_stack.order_processor.metric_duration(period=Duration.minutes(1)),
                     processing_stack.stream_enricher.metric_duration(period=Duration.minutes(1)),
+                    processing_stack.fraud_detector.metric_duration(period=Duration.minutes(1)),
+                    processing_stack.inventory_alerter.metric_duration(period=Duration.minutes(1)),
                 ],
                 width=12,
             ),

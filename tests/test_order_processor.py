@@ -2,7 +2,6 @@
 Unit tests for order processor Lambda.
 Uses moto to mock AWS services.
 """
-import base64
 import json
 import os
 import pytest
@@ -49,15 +48,12 @@ def sns_topics():
 
 
 def make_kinesis_event(order: dict) -> dict:
-    encoded = base64.b64encode(json.dumps(order).encode()).decode()
     return {
         "Records": [
             {
-                "kinesis": {
-                    "sequenceNumber": "1",
-                    "data": encoded,
-                    "partitionKey": order["customer_id"],
-                }
+                "messageId": "msg-0001",
+                "body": json.dumps(order),
+                "eventSource": "aws:sqs",
             }
         ]
     }
@@ -94,14 +90,14 @@ def test_normal_order_processed():
 
     order = {
         "order_id": "ORD-TEST001",
-        "customer_id": "CUST-000001",
+        "customer_id": "cust-aaa",
         "customer_tier": "silver",
-        "items": [{"product_id": "PROD-0001", "quantity": 1, "unit_price": 50.0, "name": "Widget", "category": "Electronics"}],
-        "subtotal": 50.0,
+        "items": [{"product_id": "abc123", "quantity": 1, "unit_price": 49.90, "category": "health_beauty", "freight": 5.0}],
+        "subtotal": 49.90,
         "discount": 0.0,
-        "total": 50.0,
+        "total": 49.90,
         "payment_method": "credit_card",
-        "shipping_address": {"street": "123 Main St", "city": "NYC", "state": "NY", "zip": "10001", "country": "US"},
+        "shipping_address": {"city": "sao paulo", "state": "SP", "country": "BR"},
         "status": "confirmed",
         "created_at": "2026-04-13T12:00:00+00:00",
         "is_suspicious": False,
@@ -110,7 +106,7 @@ def test_normal_order_processed():
     result = handler.lambda_handler(make_kinesis_event(order), None)
     assert result is None
 
-    item = table.get_item(Key={"order_id": "ORD-TEST001", "customer_id": "CUST-000001"})["Item"]
+    item = table.get_item(Key={"order_id": "ORD-TEST001", "customer_id": "cust-aaa"})["Item"]
     assert item["order_id"] == "ORD-TEST001"
     assert float(item["fraud_score"]) < 0.5
 
@@ -142,14 +138,18 @@ def test_suspicious_order_triggers_fraud_alert():
 
     order = {
         "order_id": "ORD-FRAUD001",
-        "customer_id": "CUST-999999",
+        "customer_id": "cust-bbb",
         "customer_tier": "bronze",
-        "items": [{"product_id": "PROD-0001", "quantity": 5, "unit_price": 250.0, "name": "Laptop", "category": "Electronics"}],
-        "subtotal": 1250.0,
+        # total=600 > high_value_threshold(500); bronze tier > bronze_threshold(200); crypto payment
+        "items": [
+            {"product_id": "abc123", "quantity": 1, "unit_price": 300.0, "category": "computers_accessories", "freight": 10.0},
+            {"product_id": "def456", "quantity": 1, "unit_price": 300.0, "category": "computers_accessories", "freight": 10.0},
+        ],
+        "subtotal": 600.0,
         "discount": 0.0,
-        "total": 1250.0,
+        "total": 600.0,
         "payment_method": "crypto",
-        "shipping_address": {"street": "1 Fraud Ave", "city": "Faketown", "state": "CA", "zip": "90001", "country": "US"},
+        "shipping_address": {"city": "rio de janeiro", "state": "RJ", "country": "BR"},
         "status": "confirmed",
         "created_at": "2026-04-13T12:00:00+00:00",
         "is_suspicious": True,
@@ -157,5 +157,54 @@ def test_suspicious_order_triggers_fraud_alert():
 
     handler.lambda_handler(make_kinesis_event(order), None)
 
-    item = table.get_item(Key={"order_id": "ORD-FRAUD001", "customer_id": "CUST-999999"})["Item"]
+    item = table.get_item(Key={"order_id": "ORD-FRAUD001", "customer_id": "cust-bbb"})["Item"]
     assert float(item["fraud_score"]) >= 0.5
+
+
+@mock_aws
+def test_boleto_order_not_flagged():
+    """bank_transfer (boleto) is Brazil's standard payment — must not raise fraud flags."""
+    ddb = boto3.resource("dynamodb", region_name="us-east-1")
+    ddb.create_table(
+        TableName="orders-test",
+        KeySchema=[
+            {"AttributeName": "order_id", "KeyType": "HASH"},
+            {"AttributeName": "customer_id", "KeyType": "RANGE"},
+        ],
+        AttributeDefinitions=[
+            {"AttributeName": "order_id", "AttributeType": "S"},
+            {"AttributeName": "customer_id", "AttributeType": "S"},
+        ],
+        BillingMode="PAY_PER_REQUEST",
+    )
+    sns_client = boto3.client("sns", region_name="us-east-1")
+    os.environ["FRAUD_TOPIC_ARN"]        = sns_client.create_topic(Name="fraud-test")["TopicArn"]
+    os.environ["ORDER_EVENTS_TOPIC_ARN"] = sns_client.create_topic(Name="orders-test")["TopicArn"]
+    os.environ["ORDERS_TABLE"]           = "orders-test"
+
+    import importlib
+    from lambdas.order_processor import handler
+    importlib.reload(handler)
+
+    order = {
+        "order_id":    "ORD-BOLETO01",
+        "customer_id": "cust-aaa",
+        "customer_tier": "silver",
+        "items": [{"product_id": "abc123", "quantity": 1, "unit_price": 80.0,
+                   "category": "health_beauty", "freight": 8.0}],
+        "subtotal": 80.0,
+        "discount":  0.0,
+        "total":    80.0,
+        "payment_method": "bank_transfer",   # boleto
+        "shipping_address": {"city": "sao paulo", "state": "SP", "country": "BR"},
+        "status": "confirmed",
+        "created_at": "2026-04-13T12:00:00+00:00",
+        "is_suspicious": False,
+    }
+
+    handler.lambda_handler(make_kinesis_event(order), None)
+
+    table = boto3.resource("dynamodb", region_name="us-east-1").Table("orders-test")
+    item = table.get_item(Key={"order_id": "ORD-BOLETO01", "customer_id": "cust-aaa"})["Item"]
+    assert float(item["fraud_score"]) < 0.5
+    assert "unusual_payment_method" not in item.get("fraud_flags", [])

@@ -4,7 +4,6 @@ Inventory Alerter Lambda
 - Publishes low-stock alerts to SNS
 - Updates product table with current stock level
 """
-import base64
 import json
 import logging
 import os
@@ -89,14 +88,13 @@ def lambda_handler(event, context):
     failed_item_ids = []
 
     for record in records:
-        seq = record["kinesis"]["sequenceNumber"]
         try:
-            payload = json.loads(base64.b64decode(record["kinesis"]["data"]).decode())
+            payload = json.loads(record["body"])
             process_inventory_event(payload)
             success += 1
         except Exception as e:
-            log.error("Failed to process inventory record %s: %s", seq, e)
-            failed_item_ids.append({"itemIdentifier": seq})
+            log.error("Failed to process inventory record %s: %s", record["messageId"], e)
+            failed_item_ids.append({"itemIdentifier": record["messageId"]})
 
     log.info("Processed %d/%d inventory records", success, len(records))
 

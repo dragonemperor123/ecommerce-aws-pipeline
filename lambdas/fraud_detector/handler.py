@@ -25,9 +25,11 @@ FRAUD_TOPIC_ARN = os.environ["FRAUD_TOPIC_ARN"]
 
 orders_table = dynamodb.Table(ORDERS_TABLE)
 
-# Velocity thresholds
-MAX_ORDERS_PER_HOUR = 5
-MAX_SPEND_PER_DAY = 2000
+# Velocity thresholds — calibrated against Olist dataset distributions.
+# Olist median order value ~R$120; 95th percentile ~R$500; top 1% >R$1000.
+# Brazilian customers rarely place more than 1-2 orders per day.
+MAX_ORDERS_PER_HOUR = 3
+MAX_SPEND_PER_DAY   = 1500
 
 
 def get_recent_orders(customer_id: str, hours: int = 1) -> list:

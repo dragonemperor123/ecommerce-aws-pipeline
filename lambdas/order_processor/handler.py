@@ -5,7 +5,6 @@ Order Processor Lambda
 - Runs fraud scoring
 - Publishes to SNS order-events topic
 """
-import base64
 import json
 import logging
 import os
@@ -142,14 +141,13 @@ def lambda_handler(event, context):
     failed_item_ids = []
 
     for record in records:
-        seq = record["kinesis"]["sequenceNumber"]
         try:
-            payload = json.loads(base64.b64decode(record["kinesis"]["data"]).decode())
+            payload = json.loads(record["body"])
             process_order(payload)
             success += 1
         except Exception as e:
-            log.error("Failed to process record %s: %s", seq, e)
-            failed_item_ids.append({"itemIdentifier": seq})
+            log.error("Failed to process record %s: %s", record["messageId"], e)
+            failed_item_ids.append({"itemIdentifier": record["messageId"]})
 
     log.info("Processed %d/%d order records", success, len(records))
 

@@ -1,5 +1,4 @@
 """Tests for inventory alerter Lambda."""
-import base64
 import json
 import os
 import importlib
@@ -12,11 +11,9 @@ def make_kinesis_event(events: list) -> dict:
     return {
         "Records": [
             {
-                "kinesis": {
-                    "sequenceNumber": str(i),
-                    "data": base64.b64encode(json.dumps(e).encode()).decode(),
-                    "partitionKey": e.get("product_id", "p1"),
-                }
+                "messageId": f"msg-{i:04d}",
+                "body": json.dumps(e),
+                "eventSource": "aws:sqs",
             }
             for i, e in enumerate(events)
         ]

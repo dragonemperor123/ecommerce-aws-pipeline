@@ -71,6 +71,9 @@ try:
         .withColumn("order_date", F.to_date("created_at"))
         .withColumn("total", F.col("total").cast("double"))
         .withColumn("fraud_score", F.col("fraud_score").cast("double"))
+        # Extract Brazilian state from shipping_address struct (Olist data)
+        .withColumn("shipping_state", F.col("shipping_address.state"))
+        .withColumn("shipping_city",  F.col("shipping_address.city"))
         .withColumn("processed_at", F.current_timestamp())
     )
 
@@ -121,8 +124,10 @@ try:
             F.max("created_at").alias("last_order"),
             F.countDistinct("order_date").alias("active_days"),
         )
-        .withColumn("clv_segment", F.when(F.col("total_spend") > 1000, "high")
-                    .when(F.col("total_spend") > 300, "medium")
+        # Thresholds based on Olist spend distribution:
+        # top ~10% of customers spend >R$500, top ~30% spend >R$150
+        .withColumn("clv_segment", F.when(F.col("total_spend") > 500, "high")
+                    .when(F.col("total_spend") > 150, "medium")
                     .otherwise("low"))
     )
 
@@ -152,6 +157,7 @@ try:
         F.col("item.category").alias("category"),
         F.col("item.unit_price").alias("unit_price"),
         F.col("item.quantity").alias("quantity"),
+        F.col("item.freight").alias("freight_value"),  # Olist includes freight per item
     )
 
     # Customer-product interaction matrix (for collaborative filtering)
@@ -175,6 +181,33 @@ try:
 
 except Exception as e:
     print(f"Product affinity skipped: {e}")
+
+# ── 6. State-level Revenue Aggregation (Olist — Brazilian states) ─────────────
+try:
+    orders_for_geo = spark.read.parquet(f"{PROCESSED}/orders/")
+
+    state_revenue = (
+        orders_for_geo
+        .filter(F.col("status") == "confirmed" & F.col("shipping_state").isNotNull())
+        .groupBy("shipping_state")
+        .agg(
+            F.count("order_id").alias("total_orders"),
+            F.sum("total").alias("gross_revenue"),
+            F.avg("total").alias("avg_order_value"),
+            F.countDistinct("customer_id").alias("unique_customers"),
+        )
+        .orderBy(F.col("gross_revenue").desc())
+    )
+
+    (
+        state_revenue.write
+        .mode("overwrite")
+        .parquet(f"{CURATED}/state_revenue/")
+    )
+    print(f"State revenue: wrote {state_revenue.count()} state records to curated zone")
+
+except Exception as e:
+    print(f"State revenue skipped: {e}")
 
 job.commit()
 print("Glue ETL job completed successfully.")
