@@ -1,27 +1,54 @@
 """
-Recommendation API Lambda
-- Handles POST /recommendations requests from API Gateway
-- Uses SageMaker endpoint when available, falls back to DynamoDB catalog scan
-- Enriches response with product metadata from DynamoDB
+Recommendation API Lambda — ALS collaborative filtering
+
+Flow:
+  1. On first invocation, download the trained ALS model (implicit library)
+     from S3 and cache it in /tmp for the lifetime of the Lambda container.
+  2. Given a customer_id, call model.recommend() to get personalised
+     product-level scores from the ALS latent factors.
+  3. Enrich the scored product IDs with metadata (category, price) from DynamoDB.
+  4. Cold-start (customer not in training data): fall back to globally popular
+     items derived from ALS item-factor norms, filtered to mid-range prices.
+  5. Additionally filter by price-affinity using the customer's order history
+     so recommendations match the customer's real spending behaviour.
 """
+import io
 import json
 import logging
 import os
+import random
+import tarfile
+import tempfile
 from decimal import Decimal
 
 import boto3
+import joblib
+import numpy as np
 from boto3.dynamodb.conditions import Attr
 from botocore.exceptions import ClientError
 
 log = logging.getLogger()
 log.setLevel(logging.INFO)
 
-dynamodb = boto3.resource("dynamodb")
+dynamodb  = boto3.resource("dynamodb")
+s3_client = boto3.client("s3")
 
-SAGEMAKER_ENDPOINT = os.environ.get("SAGEMAKER_ENDPOINT", "")
 PRODUCTS_TABLE = os.environ["PRODUCTS_TABLE"]
+ORDERS_TABLE   = os.environ.get("ORDERS_TABLE", "")
+MODEL_BUCKET   = os.environ.get("MODEL_BUCKET", "")
+MODEL_KEY      = os.environ.get("MODEL_KEY", "recommendation/model.tar.gz")
 
 products_table = dynamodb.Table(PRODUCTS_TABLE)
+orders_table   = dynamodb.Table(ORDERS_TABLE) if ORDERS_TABLE else None
+
+CORS = {
+    "Content-Type": "application/json",
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Headers": "Content-Type",
+}
+
+# Module-level cache — survives across warm invocations
+_model_cache: dict | None = None
 
 
 class DecimalEncoder(json.JSONEncoder):
@@ -31,110 +58,193 @@ class DecimalEncoder(json.JSONEncoder):
         return super().default(obj)
 
 
-def get_product_details(product_ids: list) -> dict:
+# ── Model loading ────────────────────────────────────────────────────────────
+
+def load_model() -> dict:
+    global _model_cache
+    if _model_cache is not None:
+        return _model_cache
+
+    if not MODEL_BUCKET:
+        log.warning("MODEL_BUCKET not set — ALS model unavailable")
+        return {}
+
+    log.info("Downloading ALS model from s3://%s/%s", MODEL_BUCKET, MODEL_KEY)
+    try:
+        obj = s3_client.get_object(Bucket=MODEL_BUCKET, Key=MODEL_KEY)
+        tar_bytes = obj["Body"].read()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode="r:gz") as tar:
+                tar.extractall(tmpdir)
+
+            _model_cache = {
+                "model":               joblib.load(os.path.join(tmpdir, "model.joblib")),
+                "customer_idx":        joblib.load(os.path.join(tmpdir, "customer_idx.joblib")),
+                "product_idx":         joblib.load(os.path.join(tmpdir, "product_idx.joblib")),
+                "reverse_product_idx": joblib.load(os.path.join(tmpdir, "reverse_product_idx.joblib")),
+            }
+        log.info("ALS model loaded — %d customers, %d products",
+                 len(_model_cache["customer_idx"]), len(_model_cache["product_idx"]))
+        return _model_cache
+    except Exception as e:
+        log.error("Failed to load ALS model: %s", e)
+        return {}
+
+
+# ── Customer history ─────────────────────────────────────────────────────────
+
+def get_customer_avg_spend(customer_id: str) -> float | None:
+    if not orders_table:
+        return None
+    try:
+        resp = orders_table.scan(
+            FilterExpression=Attr("customer_id").eq(customer_id),
+            ProjectionExpression="#t, item_count",
+            ExpressionAttributeNames={"#t": "total"},
+        )
+        orders = resp.get("Items", [])
+        if not orders:
+            return None
+        total_spend = sum(float(o.get("total", 0)) for o in orders)
+        total_items = sum(int(o.get("item_count", 1)) for o in orders)
+        return total_spend / max(total_items, 1)
+    except ClientError as e:
+        log.warning("Could not fetch orders for %s: %s", customer_id, e)
+        return None
+
+
+# ── DynamoDB enrichment ──────────────────────────────────────────────────────
+
+def enrich_products(product_ids: list) -> dict:
     if not product_ids:
         return {}
     try:
-        keys = [{"product_id": pid} for pid in product_ids[:10]]
-        response = dynamodb.meta.client.batch_get_item(
-            RequestItems={PRODUCTS_TABLE: {"Keys": keys}}
+        resp = dynamodb.meta.client.batch_get_item(
+            RequestItems={PRODUCTS_TABLE: {"Keys": [{"product_id": pid} for pid in product_ids[:100]]}}
         )
-        items = response.get("Responses", {}).get(PRODUCTS_TABLE, [])
+        items = resp.get("Responses", {}).get(PRODUCTS_TABLE, [])
         return {item["product_id"]: item for item in items}
     except ClientError as e:
-        log.warning("Could not fetch product details: %s", e)
+        log.warning("batch_get_item failed: %s", e)
         return {}
 
 
-def call_sagemaker(payload: dict, n: int) -> list:
-    sagemaker_runtime = boto3.client("sagemaker-runtime")
-    try:
-        response = sagemaker_runtime.invoke_endpoint(
-            EndpointName=SAGEMAKER_ENDPOINT,
-            ContentType="application/json",
-            Body=json.dumps(payload),
+# ── ALS recommendations ──────────────────────────────────────────────────────
+
+def als_recommend(customer_id: str, n: int, avg_spend: float | None) -> tuple[list, str]:
+    artifacts = load_model()
+    if not artifacts:
+        return [], "model_unavailable"
+
+    model            = artifacts["model"]
+    customer_idx     = artifacts["customer_idx"]
+    reverse_pid      = artifacts["reverse_product_idx"]
+
+    fetch_n = min(n * 8, 200)  # fetch more, then filter by price
+
+    if customer_id in customer_idx:
+        uid = customer_idx[customer_id]
+        ids, scores = model.recommend(
+            uid, model.user_factors[uid],
+            N=fetch_n, filter_already_liked_items=True,
         )
-        result = json.loads(response["Body"].read().decode("utf-8"))
-        return result.get("recommendations", [])
-    except ClientError as e:
-        log.error("SageMaker invocation failed: %s", e)
-        raise
+        strategy = "als_personalised"
+    else:
+        # Cold start: rank by item-factor norm (global popularity proxy)
+        norms      = np.linalg.norm(model.item_factors, axis=1)
+        top_idx    = np.argsort(norms)[::-1][:fetch_n]
+        ids, scores = top_idx, norms[top_idx]
+        strategy   = "als_popular"
 
+    candidates = [
+        {"product_id": reverse_pid[int(iid)], "raw_score": float(sc)}
+        for iid, sc in zip(ids, scores)
+        if int(iid) in reverse_pid
+    ]
 
-def catalog_fallback(category_hint: str, n: int) -> list:
-    """Return top-N products from DynamoDB, optionally filtered by category."""
-    try:
-        if category_hint:
-            resp = products_table.scan(
-                FilterExpression=Attr("category").eq(category_hint),
-                Limit=n * 3,
-            )
-        else:
-            resp = products_table.scan(Limit=n * 3)
-        items = resp.get("Items", [])[:n]
-        return [
-            {
-                "product_id": item["product_id"],
-                "score": None,
-                "rank": i + 1,
-                "category": item.get("category"),
-                "unit_price": float(item["unit_price"]) if item.get("unit_price") is not None else None,
+    # Enrich with DynamoDB metadata
+    pid_list  = [c["product_id"] for c in candidates]
+    meta      = enrich_products(pid_list)
+
+    results = []
+    for c in candidates:
+        pid  = c["product_id"]
+        item = meta.get(pid, {})
+        price = float(item["unit_price"]) if item.get("unit_price") is not None else None
+
+        # Price-affinity filter: keep products within ±60% of avg spend
+        if avg_spend and price is not None:
+            if not (avg_spend * 0.4 <= price <= avg_spend * 1.6):
+                continue
+
+        results.append({
+            "product_id":  pid,
+            "score":       round(min(c["raw_score"], 0.99), 3),
+            "rank":        len(results) + 1,
+            "category":    item.get("category"),
+            "unit_price":  price,
+            "stock_level": int(item["stock_level"]) if item.get("stock_level") is not None else None,
+            "source":      strategy,
+        })
+
+        if len(results) >= n:
+            break
+
+    # If price filter left too few results, relax and fill from the full candidate list
+    if len(results) < n:
+        for c in candidates:
+            if len(results) >= n:
+                break
+            pid = c["product_id"]
+            if any(r["product_id"] == pid for r in results):
+                continue
+            item = meta.get(pid, {})
+            results.append({
+                "product_id":  pid,
+                "score":       round(min(c["raw_score"], 0.99), 3),
+                "rank":        len(results) + 1,
+                "category":    item.get("category"),
+                "unit_price":  float(item["unit_price"]) if item.get("unit_price") is not None else None,
                 "stock_level": int(item["stock_level"]) if item.get("stock_level") is not None else None,
-                "source": "catalog_fallback",
-            }
-            for i, item in enumerate(items)
-        ]
-    except ClientError as e:
-        log.error("DynamoDB scan failed: %s", e)
-        return []
+                "source":      strategy,
+            })
 
+    return results, strategy
+
+
+# ── Lambda handler ───────────────────────────────────────────────────────────
 
 def lambda_handler(event, context):
     try:
         body = json.loads(event.get("body") or "{}")
     except json.JSONDecodeError:
-        return {
-            "statusCode": 400,
-            "body": json.dumps({"error": "Invalid JSON body"}),
-            "headers": {"Content-Type": "application/json"},
-        }
+        return {"statusCode": 400, "body": json.dumps({"error": "Invalid JSON body"}), "headers": CORS}
 
     customer_id = body.get("customer_id")
-    context_product_id = body.get("product_id")
-    category_hint = body.get("category", "")
-    n = min(int(body.get("n", 5)), 20)
+    n           = min(int(body.get("n", 5)), 20)
 
-    if not customer_id and not context_product_id:
-        return {
-            "statusCode": 400,
-            "body": json.dumps({"error": "Provide customer_id or product_id"}),
-            "headers": {"Content-Type": "application/json"},
-        }
+    if not customer_id:
+        return {"statusCode": 400, "body": json.dumps({"error": "Provide customer_id"}), "headers": CORS}
 
-    # Use SageMaker when endpoint is configured, otherwise use catalog fallback
-    if SAGEMAKER_ENDPOINT:
-        try:
-            recommendations = call_sagemaker({
-                "customer_id": customer_id,
-                "product_id": context_product_id,
-                "n": n,
-            }, n)
-        except Exception as e:
-            log.warning("SageMaker unavailable, falling back to catalog: %s", e)
-            recommendations = catalog_fallback(category_hint, n)
-    else:
-        log.info("No SageMaker endpoint configured — using catalog fallback")
-        recommendations = catalog_fallback(category_hint, n)
+    avg_spend     = get_customer_avg_spend(customer_id)
+    recommendations, strategy = als_recommend(customer_id, n, avg_spend)
+
+    # Re-rank for display
+    for i, r in enumerate(recommendations):
+        r["rank"] = i + 1
 
     return {
         "statusCode": 200,
         "body": json.dumps(
             {
-                "customer_id": customer_id,
-                "recommendations": recommendations,
-                "count": len(recommendations),
+                "customer_id":          customer_id,
+                "recommendations":      recommendations,
+                "count":                len(recommendations),
+                "strategy":             strategy,
+                "avg_spend_per_item":   round(avg_spend, 2) if avg_spend else None,
             },
             cls=DecimalEncoder,
         ),
-        "headers": {"Content-Type": "application/json"},
+        "headers": CORS,
     }

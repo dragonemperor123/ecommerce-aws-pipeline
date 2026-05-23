@@ -75,6 +75,8 @@ class MLStack(Stack):
             ],
         )
         storage_stack.products_table.grant_read_data(lambda_role)
+        storage_stack.orders_table.grant_read_data(lambda_role)
+        storage_stack.model_bucket.grant_read(lambda_role)
 
         reco_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../lambdas/recommendation_api"))
         self.recommendation_fn = _lambda.Function(
@@ -94,11 +96,13 @@ class MLStack(Stack):
                 ),
             ),
             role=lambda_role,
-            timeout=Duration.seconds(10),
-            memory_size=256,
+            timeout=Duration.seconds(30),
+            memory_size=512,
             environment={
-                "SAGEMAKER_ENDPOINT": "",  # empty = use catalog fallback
                 "PRODUCTS_TABLE": storage_stack.products_table.table_name,
+                "ORDERS_TABLE":   storage_stack.orders_table.table_name,
+                "MODEL_BUCKET":   storage_stack.model_bucket.bucket_name,
+                "MODEL_KEY":      "recommendation/model.tar.gz",
             },
         )
 
@@ -116,7 +120,14 @@ class MLStack(Stack):
             ),
         )
 
-        recommendations_resource = self.api.root.add_resource("recommendations")
+        recommendations_resource = self.api.root.add_resource(
+            "recommendations",
+            default_cors_preflight_options=apigw.CorsOptions(
+                allow_origins=apigw.Cors.ALL_ORIGINS,
+                allow_methods=["POST", "OPTIONS"],
+                allow_headers=["Content-Type", "Authorization"],
+            ),
+        )
         recommendations_resource.add_method(
             "POST",
             apigw.LambdaIntegration(self.recommendation_fn, proxy=True),

@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Real-time Ecommerce Pipeline · AWS</title>
+  <style>
+    :root {
+      --bg: #0f1117;
+      --card: #1a1d27;
+      --border: #2a2d3a;
+      --accent: #ff9900;
+      --accent2: #00d4aa;
+      --text: #e2e8f0;
+      --muted: #8892a4;
+      --success: #22c55e;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: var(--bg); color: var(--text); font-family: 'Segoe UI', system-ui, sans-serif; min-height: 100vh; }
+
+    /* ── Header ── */
+    header {
+      background: linear-gradient(135deg, #1a1d27 0%, #0f1117 100%);
+      border-bottom: 1px solid var(--border);
+      padding: 28px 40px;
+      display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 16px;
+    }
+    .logo { display: flex; align-items: center; gap: 14px; }
+    .logo-icon {
+      width: 44px; height: 44px; border-radius: 10px;
+      background: linear-gradient(135deg, var(--accent), #ff6600);
+      display: flex; align-items: center; justify-content: center; font-size: 22px;
+    }
+    h1 { font-size: 1.45rem; font-weight: 700; letter-spacing: -0.3px; }
+    h1 span { color: var(--accent); }
+    .live-badge {
+      display: flex; align-items: center; gap: 7px;
+      background: rgba(34,197,94,0.12); border: 1px solid rgba(34,197,94,0.3);
+      color: var(--success); border-radius: 20px; padding: 6px 14px; font-size: 0.82rem; font-weight: 600;
+    }
+    .live-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--success); animation: pulse 1.5s infinite; }
+    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+    /* ── Main layout ── */
+    main { max-width: 1100px; margin: 0 auto; padding: 40px 24px; display: flex; flex-direction: column; gap: 32px; }
+
+    /* ── Cards ── */
+    .card {
+      background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 28px;
+    }
+    .card-title { font-size: 0.75rem; font-weight: 700; letter-spacing: 1.2px; text-transform: uppercase; color: var(--muted); margin-bottom: 20px; }
+
+    /* ── Stats row ── */
+    .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 16px; }
+    .stat { background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 20px; text-align: center; }
+    .stat-val { font-size: 2rem; font-weight: 800; color: var(--accent); line-height: 1; }
+    .stat-label { font-size: 0.78rem; color: var(--muted); margin-top: 6px; }
+
+    /* ── Architecture ── */
+    .arch { display: flex; align-items: center; gap: 0; flex-wrap: wrap; justify-content: center; }
+    .arch-node {
+      background: var(--bg); border: 1px solid var(--border); border-radius: 10px;
+      padding: 14px 18px; text-align: center; min-width: 110px;
+    }
+    .arch-node .icon { font-size: 1.6rem; display: block; margin-bottom: 6px; }
+    .arch-node .name { font-size: 0.72rem; font-weight: 700; color: var(--text); }
+    .arch-node .sub { font-size: 0.65rem; color: var(--muted); margin-top: 2px; }
+    .arch-arrow {
+      color: var(--accent); font-size: 1.2rem; padding: 0 8px; flex-shrink: 0;
+    }
+    .arch-group { display: flex; flex-direction: column; gap: 10px; }
+    .arch-group-label { font-size: 0.62rem; color: var(--accent2); letter-spacing: 0.8px; text-transform: uppercase; text-align: center; }
+
+    /* ── Demo section ── */
+    .demo-row { display: flex; gap: 12px; margin-bottom: 20px; flex-wrap: wrap; }
+    .demo-input {
+      flex: 1; min-width: 200px; background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+      padding: 12px 16px; color: var(--text); font-size: 0.95rem; outline: none;
+      transition: border-color 0.2s;
+    }
+    .demo-input:focus { border-color: var(--accent); }
+    .demo-input::placeholder { color: var(--muted); }
+    .btn {
+      background: var(--accent); color: #000; font-weight: 700; font-size: 0.9rem;
+      padding: 12px 24px; border: none; border-radius: 8px; cursor: pointer; transition: opacity 0.2s;
+      white-space: nowrap;
+    }
+    .btn:hover { opacity: 0.85; }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    .results { display: none; flex-direction: column; gap: 10px; }
+    .results.visible { display: flex; }
+    .result-item {
+      background: var(--bg); border: 1px solid var(--border); border-radius: 10px;
+      padding: 16px 20px; display: flex; align-items: center; justify-content: space-between; gap: 16px;
+      animation: fadeIn 0.3s ease;
+    }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+    .result-rank { font-size: 0.7rem; color: var(--muted); font-weight: 700; min-width: 32px; }
+    .result-info { flex: 1; }
+    .result-cat { font-size: 0.88rem; font-weight: 600; text-transform: capitalize; }
+    .result-id { font-size: 0.68rem; color: var(--muted); font-family: monospace; margin-top: 2px; }
+    .result-price { font-size: 1.05rem; font-weight: 700; color: var(--accent2); }
+    .result-source {
+      font-size: 0.65rem; background: rgba(0,212,170,0.1); border: 1px solid rgba(0,212,170,0.25);
+      color: var(--accent2); padding: 3px 8px; border-radius: 20px;
+    }
+    .error-msg { color: #f87171; font-size: 0.88rem; padding: 12px 16px; background: rgba(248,113,113,0.08); border-radius: 8px; border: 1px solid rgba(248,113,113,0.2); }
+    .loading { color: var(--muted); font-size: 0.9rem; padding: 12px 0; }
+
+    /* ── Pipeline flow ── */
+    .flow-list { list-style: none; display: flex; flex-direction: column; gap: 12px; }
+    .flow-item { display: flex; align-items: flex-start; gap: 16px; }
+    .flow-num {
+      width: 28px; height: 28px; border-radius: 50%; background: var(--accent);
+      color: #000; font-weight: 800; font-size: 0.75rem; display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+    }
+    .flow-text strong { display: block; font-size: 0.9rem; margin-bottom: 2px; }
+    .flow-text span { font-size: 0.8rem; color: var(--muted); }
+
+    /* ── Tech badges ── */
+    .badges { display: flex; flex-wrap: wrap; gap: 10px; }
+    .badge {
+      background: var(--bg); border: 1px solid var(--border); border-radius: 20px;
+      padding: 6px 14px; font-size: 0.78rem; color: var(--text); font-weight: 500;
+    }
+    .badge.aws { border-color: rgba(255,153,0,0.4); color: var(--accent); }
+
+    footer {
+      text-align: center; padding: 24px; color: var(--muted); font-size: 0.8rem;
+      border-top: 1px solid var(--border); margin-top: 16px;
+    }
+    footer a { color: var(--accent2); text-decoration: none; }
+    .preset-btn {
+      background: var(--bg); border: 1px solid var(--border); border-radius: 20px;
+      color: var(--muted); font-size: 0.75rem; padding: 5px 12px; cursor: pointer;
+      transition: border-color 0.2s, color 0.2s;
+    }
+    .preset-btn:hover, .preset-btn.active { border-color: var(--accent); color: var(--accent); }
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="logo">
+    <div class="logo-icon">🛒</div>
+    <div>
+      <h1>Real-time <span>Ecommerce</span> Pipeline</h1>
+      <div style="font-size:0.78rem;color:var(--muted);margin-top:3px;">Powered by AWS · Olist Brazilian Dataset · eu-north-1</div>
+    </div>
+  </div>
+  <div class="live-badge">
+    <span class="live-dot"></span>
+    LIVE ON AWS
+  </div>
+</header>
+
+<main>
+
+  <!-- Stats -->
+  <div class="card">
+    <div class="card-title">Pipeline at a Glance</div>
+    <div class="stats">
+      <div class="stat"><div class="stat-val">32,951</div><div class="stat-label">Products Indexed</div></div>
+      <div class="stat"><div class="stat-val">5</div><div class="stat-label">Lambda Functions</div></div>
+      <div class="stat"><div class="stat-val">3</div><div class="stat-label">SQS Queues</div></div>
+      <div class="stat"><div class="stat-val">&lt;1s</div><div class="stat-label">Event Latency</div></div>
+      <div class="stat"><div class="stat-val">~$3</div><div class="stat-label">Monthly Cost</div></div>
+      <div class="stat"><div class="stat-val">6</div><div class="stat-label">CDK Stacks</div></div>
+    </div>
+  </div>
+
+  <!-- Architecture -->
+  <div class="card">
+    <div class="card-title">Architecture</div>
+    <div class="arch">
+      <div class="arch-node">
+        <span class="icon">📦</span>
+        <div class="name">Olist Dataset</div>
+        <div class="sub">100k+ orders</div>
+      </div>
+      <div class="arch-arrow">→</div>
+      <div class="arch-group">
+        <div class="arch-group-label">SQS Queues</div>
+        <div class="arch-node"><span class="icon">📨</span><div class="name">Orders</div></div>
+        <div class="arch-node"><span class="icon">👆</span><div class="name">Clickstream</div></div>
+        <div class="arch-node"><span class="icon">📦</span><div class="name">Inventory</div></div>
+      </div>
+      <div class="arch-arrow">→</div>
+      <div class="arch-group">
+        <div class="arch-group-label">Lambda</div>
+        <div class="arch-node"><span class="icon">⚡</span><div class="name">Order Processor</div></div>
+        <div class="arch-node"><span class="icon">🔍</span><div class="name">Fraud Detector</div></div>
+        <div class="arch-node"><span class="icon">🔔</span><div class="name">Inventory Alerter</div></div>
+      </div>
+      <div class="arch-arrow">→</div>
+      <div class="arch-group">
+        <div class="arch-group-label">Storage</div>
+        <div class="arch-node"><span class="icon">🗄️</span><div class="name">DynamoDB</div><div class="sub">orders · products</div></div>
+        <div class="arch-node"><span class="icon">🪣</span><div class="name">S3 Data Lake</div><div class="sub">raw · processed · curated</div></div>
+      </div>
+      <div class="arch-arrow">→</div>
+      <div class="arch-group">
+        <div class="arch-group-label">Analytics & ML</div>
+        <div class="arch-node"><span class="icon">🔎</span><div class="name">Glue + Athena</div></div>
+        <div class="arch-node"><span class="icon">🤖</span><div class="name">SageMaker</div><div class="sub">recommendations</div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Live Demo -->
+  <div class="card">
+    <div class="card-title" style="display:flex;justify-content:space-between;align-items:center;">
+      <span>Live Recommendations API · Try it</span>
+      <span id="fetchedAt" style="font-size:0.72rem;color:var(--accent2);font-weight:500;letter-spacing:0;text-transform:none;"></span>
+    </div>
+    <p style="font-size:0.82rem;color:var(--muted);margin-bottom:16px;line-height:1.5;">
+      The Lambda looks up this customer's <strong style="color:var(--text)">real order history</strong> in DynamoDB, computes their average spend per item, then recommends products priced within ±50% of that figure. Pick a real customer below to see how the price band changes per person — a budget shopper and a luxury shopper get completely different recommendations.
+    </p>
+    <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px;">
+      <span style="font-size:0.75rem;color:var(--muted);align-self:center;margin-right:4px;">Real customers:</span>
+      <button class="preset-btn" onclick="setCustomer('b8b00f5eaed92d8702f649dafb7dfd97','Budget shopper · R$9/item')">Budget · R$9</button>
+      <button class="preset-btn" onclick="setCustomer('49b82890f880fd8d14654245b0826623','Mid-range · R$50/item')">Mid-range · R$50</button>
+      <button class="preset-btn" onclick="setCustomer('197b426cedb5936cdb34c7ac176d58b9','Premium · R$101/item')">Premium · R$101</button>
+      <button class="preset-btn" onclick="setCustomer('6b90b6b48d55aa6fa6e3f9e9c3f04881','High-end · R$210/item')">High-end · R$210</button>
+      <button class="preset-btn" onclick="setCustomer('5358667640552c9500b4735e5f3a04a2','Luxury · R$448/item')">Luxury · R$448</button>
+      <button class="preset-btn" onclick="setCustomer('09d08b0705e879f4d8bcd0792308e83d','Ultra-premium · R$950/item')">Ultra · R$950</button>
+    </div>
+    <div class="demo-row">
+      <input class="demo-input" id="customerId" type="text" placeholder="Paste any Olist customer UUID" value="b8b00f5eaed92d8702f649dafb7dfd97" />
+      <select class="demo-input" id="category" style="max-width:180px;">
+        <option value="">Any category</option>
+        <option value="furniture_decor">Furniture & Decor</option>
+        <option value="health_beauty">Health & Beauty</option>
+        <option value="telephony">Telephony</option>
+        <option value="watches_gifts">Watches & Gifts</option>
+        <option value="computers_accessories">Computers</option>
+        <option value="sports_leisure">Sports & Leisure</option>
+        <option value="garden_tools">Garden Tools</option>
+        <option value="toys">Toys</option>
+      </select>
+      <button class="btn" id="fetchBtn" onclick="fetchRecs()">Get Recommendations →</button>
+    </div>
+    <div id="loading" class="loading" style="display:none;">Calling AWS Lambda via API Gateway…</div>
+    <div id="error" class="error-msg" style="display:none;"></div>
+    <div id="results" class="results"></div>
+  </div>
+
+  <!-- How it works -->
+  <div class="card">
+    <div class="card-title">How It Works</div>
+    <ul class="flow-list">
+      <li class="flow-item">
+        <div class="flow-num">1</div>
+        <div class="flow-text">
+          <strong>Event Ingestion</strong>
+          <span>A Python generator replays 100k+ real Brazilian Olist orders, clickstream events, and inventory updates into three SQS queues at configurable throughput.</span>
+        </div>
+      </li>
+      <li class="flow-item">
+        <div class="flow-num">2</div>
+        <div class="flow-text">
+          <strong>Stream Processing</strong>
+          <span>Lambda functions consume queue messages: the Order Processor writes to DynamoDB, the Fraud Detector flags anomalous payments via SNS, and the Inventory Alerter triggers low-stock notifications.</span>
+        </div>
+      </li>
+      <li class="flow-item">
+        <div class="flow-num">3</div>
+        <div class="flow-text">
+          <strong>Data Lake</strong>
+          <span>Raw and enriched events land in S3 (raw / processed / curated zones). AWS Glue crawlers catalog the data; Athena enables ad-hoc SQL analytics over the full order history.</span>
+        </div>
+      </li>
+      <li class="flow-item">
+        <div class="flow-num">4</div>
+        <div class="flow-text">
+          <strong>ML Recommendations</strong>
+          <span>A SageMaker model is trained on the Olist catalog. The Recommendation API (above) serves personalised product suggestions in real time via API Gateway + Lambda, with a DynamoDB catalog fallback.</span>
+        </div>
+      </li>
+    </ul>
+  </div>
+
+  <!-- Tech stack -->
+  <div class="card">
+    <div class="card-title">Tech Stack</div>
+    <div class="badges">
+      <span class="badge aws">AWS SQS</span>
+      <span class="badge aws">AWS Lambda</span>
+      <span class="badge aws">AWS DynamoDB</span>
+      <span class="badge aws">AWS S3</span>
+      <span class="badge aws">AWS Glue</span>
+      <span class="badge aws">AWS Athena</span>
+      <span class="badge aws">AWS SageMaker</span>
+      <span class="badge aws">AWS SNS</span>
+      <span class="badge aws">API Gateway</span>
+      <span class="badge aws">CloudWatch</span>
+      <span class="badge">Python 3.11</span>
+      <span class="badge">AWS CDK</span>
+      <span class="badge">Pandas</span>
+      <span class="badge">Olist Dataset</span>
+    </div>
+  </div>
+
+</main>
+
+<footer>
+  Built with AWS CDK · Deployed to eu-north-1 · <a href="https://github.com/dragonemperor123" target="_blank">github.com/dragonemperor123</a>
+</footer>
+
+<script>
+  const API = 'https://pnrzugwp32.execute-api.eu-north-1.amazonaws.com/prod/recommendations';
+
+  async function fetchRecs() {
+    const btn = document.getElementById('fetchBtn');
+    const loading = document.getElementById('loading');
+    const errorEl = document.getElementById('error');
+    const resultsEl = document.getElementById('results');
+    const customerId = document.getElementById('customerId').value.trim() || 'customer-001';
+    const category = document.getElementById('category').value;
+
+    btn.disabled = true;
+    loading.style.display = 'block';
+    errorEl.style.display = 'none';
+    resultsEl.innerHTML = '';
+    resultsEl.classList.remove('visible');
+
+    try {
+      const body = { customer_id: customerId, n: 6 };
+      if (category) body.category = category;
+
+      const res = await fetch(API, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json();
+
+      if (!res.ok) {
+        errorEl.textContent = data.error || 'API error';
+        errorEl.style.display = 'block';
+        return;
+      }
+
+      if (!data.recommendations || data.recommendations.length === 0) {
+        errorEl.textContent = 'No recommendations returned. Try seeding the products table first.';
+        errorEl.style.display = 'block';
+        return;
+      }
+
+      const fetchedAt = document.getElementById('fetchedAt');
+      const strategyLabels = {
+        price_affinity: '🎯 Price-affinity',
+        popular_picks:  '⭐ Popular picks (new customer)',
+        sagemaker:      '🤖 SageMaker ML',
+      };
+      const sourceMap2 = {
+        price_affinity_explore: 'Price match',
+        popular_picks: 'Popular',
+        dynamodb_live: 'DynamoDB',
+        sagemaker: 'SageMaker',
+      };
+      const strategyLabel = strategyLabels[data.strategy] || data.strategy || 'Live';
+      const avgHint = data.avg_spend_per_item
+        ? ` · exploring R$ ${(data.avg_spend_per_item * 0.5).toFixed(0)}–R$ ${(data.avg_spend_per_item * 1.5).toFixed(0)} price band`
+        : '';
+      if (fetchedAt) fetchedAt.textContent = `${strategyLabel}${avgHint} · ${new Date().toLocaleTimeString()}`;
+
+      data.recommendations.forEach((r, i) => {
+        const cat = (r.category || 'unknown').replace(/_/g, ' ');
+        const price = r.unit_price != null ? `R$ ${r.unit_price.toFixed(2)}` : '—';
+        const score = r.score != null ? `${(r.score * 100).toFixed(0)}% match` : '';
+        const sourceMap = { price_affinity: 'Price match', popular_picks: 'Popular', dynamodb_live: 'DynamoDB', sagemaker: 'SageMaker' };
+        const sourceLabel = sourceMap[r.source] || r.source || 'live';
+        const div = document.createElement('div');
+        div.className = 'result-item';
+        div.style.animationDelay = `${i * 60}ms`;
+        div.innerHTML = `
+          <div class="result-rank">#${i + 1}</div>
+          <div class="result-info">
+            <div class="result-cat">${cat}</div>
+            <div class="result-id">${r.product_id}</div>
+          </div>
+          ${score ? `<div style="font-size:0.78rem;color:var(--muted);min-width:70px;text-align:right;">${score}</div>` : ''}
+          <div class="result-price">${price}</div>
+          <div class="result-source">${sourceLabel}</div>
+        `;
+        resultsEl.appendChild(div);
+      });
+      resultsEl.classList.add('visible');
+    } catch (e) {
+      errorEl.textContent = 'Network error: ' + e.message;
+      errorEl.style.display = 'block';
+    } finally {
+      loading.style.display = 'none';
+      btn.disabled = false;
+    }
+  }
+
+  function setCustomer(id, label) {
+    document.getElementById('customerId').value = id;
+    document.querySelectorAll('.preset-btn').forEach(b => b.classList.remove('active'));
+    event.target.classList.add('active');
+    fetchRecs();
+  }
+
+  // Auto-load on page open with the first preset
+  window.addEventListener('load', () => {
+    document.querySelector('.preset-btn').classList.add('active');
+    fetchRecs();
+  });
+</script>
+
+</body>
+</html>
