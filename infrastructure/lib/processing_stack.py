@@ -32,7 +32,13 @@ class LocalBundler:
             req = os.path.join(self.source_path, "requirements.txt")
             if os.path.exists(req):
                 subprocess.run(
-                    ["pip", "install", "-r", req, "-t", output_dir, "-q"],
+                    [
+                        "pip", "install", "-r", req, "-t", output_dir, "-q",
+                        "--platform", "manylinux2014_x86_64",
+                        "--python-version", "311",
+                        "--implementation", "cp",
+                        "--only-binary=:all:",
+                    ],
                     check=True,
                 )
             for item in os.listdir(self.source_path):

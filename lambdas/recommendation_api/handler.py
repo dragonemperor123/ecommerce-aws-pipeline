@@ -230,7 +230,27 @@ def lambda_handler(event, context):
     avg_spend     = get_customer_avg_spend(customer_id)
     recommendations, strategy = als_recommend(customer_id, n, avg_spend)
 
-    # Re-rank for display
+    # Catalog fallback when model is unavailable or returned nothing
+    if not recommendations:
+        strategy = "catalog_fallback"
+        try:
+            resp = products_table.scan(Limit=n * 4)
+            items = resp.get("Items", [])[:n]
+            recommendations = [
+                {
+                    "product_id":  item["product_id"],
+                    "score":       None,
+                    "rank":        i + 1,
+                    "category":    item.get("category"),
+                    "unit_price":  float(item["unit_price"]) if item.get("unit_price") is not None else None,
+                    "stock_level": int(item["stock_level"]) if item.get("stock_level") is not None else None,
+                    "source":      "catalog_fallback",
+                }
+                for i, item in enumerate(items)
+            ]
+        except Exception as e:
+            log.error("Catalog fallback failed: %s", e)
+
     for i, r in enumerate(recommendations):
         r["rank"] = i + 1
 
