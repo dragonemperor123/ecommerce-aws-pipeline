@@ -219,15 +219,15 @@
     </p>
     <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px;">
       <span style="font-size:0.75rem;color:var(--muted);align-self:center;margin-right:4px;">Real customers:</span>
-      <button class="preset-btn" onclick="setCustomer('b8b00f5eaed92d8702f649dafb7dfd97','Budget shopper · R$9/item')">Budget · R$9</button>
-      <button class="preset-btn" onclick="setCustomer('49b82890f880fd8d14654245b0826623','Mid-range · R$50/item')">Mid-range · R$50</button>
-      <button class="preset-btn" onclick="setCustomer('197b426cedb5936cdb34c7ac176d58b9','Premium · R$101/item')">Premium · R$101</button>
-      <button class="preset-btn" onclick="setCustomer('6b90b6b48d55aa6fa6e3f9e9c3f04881','High-end · R$210/item')">High-end · R$210</button>
-      <button class="preset-btn" onclick="setCustomer('5358667640552c9500b4735e5f3a04a2','Luxury · R$448/item')">Luxury · R$448</button>
-      <button class="preset-btn" onclick="setCustomer('09d08b0705e879f4d8bcd0792308e83d','Ultra-premium · R$950/item')">Ultra · R$950</button>
+      <button class="preset-btn" onclick="setCustomer('960118b2d734220509690e16787f955e','Budget · R$20/item')">Budget · R$20</button>
+      <button class="preset-btn" onclick="setCustomer('536a347bf87825d4f41bc936bf48a72c','Low · R$39/item')">Low · R$39</button>
+      <button class="preset-btn" onclick="setCustomer('c5d3ed7ec11b725a565192292bb411cc','Mid-range · R$60/item')">Mid · R$60</button>
+      <button class="preset-btn" onclick="setCustomer('83b82ec5bf93a47ccfbe05452ea32009','Premium · R$85/item')">Premium · R$85</button>
+      <button class="preset-btn" onclick="setCustomer('651ed17eda0600815cf614b33c535d6b','High-end · R$128/item')">High-end · R$128</button>
+      <button class="preset-btn" onclick="setCustomer('1a27a558aac4c4bfe3642b8c9bffcf4f','Luxury · R$229/item')">Luxury · R$229</button>
     </div>
     <div class="demo-row">
-      <input class="demo-input" id="customerId" type="text" placeholder="Paste any Olist customer UUID" value="b8b00f5eaed92d8702f649dafb7dfd97" />
+      <input class="demo-input" id="customerId" type="text" placeholder="Paste any Olist customer_unique_id" value="960118b2d734220509690e16787f955e" />
       <select class="demo-input" id="category" style="max-width:180px;">
         <option value="">Any category</option>
         <option value="furniture_decor">Furniture & Decor</option>
@@ -243,6 +243,7 @@
     </div>
     <div id="loading" class="loading" style="display:none;">Calling AWS Lambda via API Gateway…</div>
     <div id="error" class="error-msg" style="display:none;"></div>
+    <div id="explanation" style="display:none;font-size:0.82rem;color:var(--accent2);padding:10px 14px;background:rgba(0,212,170,0.06);border:1px solid rgba(0,212,170,0.2);border-radius:8px;margin-bottom:12px;font-style:italic;"></div>
     <div id="results" class="results"></div>
   </div>
 
@@ -350,27 +351,32 @@
 
       const fetchedAt = document.getElementById('fetchedAt');
       const strategyLabels = {
-        price_affinity: '🎯 Price-affinity',
-        popular_picks:  '⭐ Popular picks (new customer)',
-        sagemaker:      '🤖 SageMaker ML',
-      };
-      const sourceMap2 = {
-        price_affinity_explore: 'Price match',
-        popular_picks: 'Popular',
-        dynamodb_live: 'DynamoDB',
-        sagemaker: 'SageMaker',
+        als_personalised: '🤖 ALS personalised',
+        als_popular:      '⭐ Trending (new customer)',
+        catalog_fallback: '📦 Catalog browse',
       };
       const strategyLabel = strategyLabels[data.strategy] || data.strategy || 'Live';
       const avgHint = data.avg_spend_per_item
-        ? ` · exploring R$ ${(data.avg_spend_per_item * 0.5).toFixed(0)}–R$ ${(data.avg_spend_per_item * 1.5).toFixed(0)} price band`
+        ? ` · R$${(data.avg_spend_per_item * 0.4).toFixed(0)}–R$${(data.avg_spend_per_item * 1.6).toFixed(0)} price band`
         : '';
       if (fetchedAt) fetchedAt.textContent = `${strategyLabel}${avgHint} · ${new Date().toLocaleTimeString()}`;
+
+      // Show Claude explanation if present
+      const explanationEl = document.getElementById('explanation');
+      if (explanationEl) {
+        if (data.explanation) {
+          explanationEl.textContent = '✦ ' + data.explanation;
+          explanationEl.style.display = 'block';
+        } else {
+          explanationEl.style.display = 'none';
+        }
+      }
 
       data.recommendations.forEach((r, i) => {
         const cat = (r.category || 'unknown').replace(/_/g, ' ');
         const price = r.unit_price != null ? `R$ ${r.unit_price.toFixed(2)}` : '—';
         const score = r.score != null ? `${(r.score * 100).toFixed(0)}% match` : '';
-        const sourceMap = { price_affinity: 'Price match', popular_picks: 'Popular', dynamodb_live: 'DynamoDB', sagemaker: 'SageMaker' };
+        const sourceMap = { als_personalised: 'ALS', als_popular: 'Trending', catalog_fallback: 'Catalog', dynamodb_live: 'DynamoDB' };
         const sourceLabel = sourceMap[r.source] || r.source || 'live';
         const div = document.createElement('div');
         div.className = 'result-item';

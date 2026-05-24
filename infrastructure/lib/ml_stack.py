@@ -99,10 +99,11 @@ class MLStack(Stack):
             timeout=Duration.seconds(30),
             memory_size=512,
             environment={
-                "PRODUCTS_TABLE": storage_stack.products_table.table_name,
-                "ORDERS_TABLE":   storage_stack.orders_table.table_name,
-                "MODEL_BUCKET":   storage_stack.model_bucket.bucket_name,
-                "MODEL_KEY":      "recommendation/model.tar.gz",
+                "PRODUCTS_TABLE":    storage_stack.products_table.table_name,
+                "ORDERS_TABLE":      storage_stack.orders_table.table_name,
+                "MODEL_BUCKET":      storage_stack.model_bucket.bucket_name,
+                "MODEL_KEY":         "recommendation/model.tar.gz",
+                "ANTHROPIC_API_KEY": "",  # set via: aws lambda update-function-configuration
             },
         )
 

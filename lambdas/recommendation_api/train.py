@@ -125,6 +125,12 @@ def train(df: pd.DataFrame, output_dir: str, factors: int = 64, iterations: int 
     joblib.dump(product_idx,         os.path.join(output_dir, "product_idx.joblib"))
     joblib.dump(reverse_product_idx, os.path.join(output_dir, "reverse_product_idx.joblib"))
 
+    # We fit on item_user_matrix (items×users), so implicit's internal naming is
+    # inverted: model.user_factors = product latent vectors (n_items × factors),
+    # model.item_factors = customer latent vectors (n_users × factors).
+    np.save(os.path.join(output_dir, "user_factors.npy"),  model.item_factors)  # (n_customers, factors)
+    np.save(os.path.join(output_dir, "item_factors.npy"),  model.user_factors)  # (n_products,  factors)
+
     log.info("Model artifacts saved to %s", output_dir)
     return model, customer_idx, product_idx
 

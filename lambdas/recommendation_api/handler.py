@@ -27,16 +27,23 @@ import numpy as np
 from boto3.dynamodb.conditions import Attr
 from botocore.exceptions import ClientError
 
+try:
+    import anthropic as _anthropic
+    _anthropic_available = True
+except ImportError:
+    _anthropic_available = False
+
 log = logging.getLogger()
 log.setLevel(logging.INFO)
 
 dynamodb  = boto3.resource("dynamodb")
 s3_client = boto3.client("s3")
 
-PRODUCTS_TABLE = os.environ["PRODUCTS_TABLE"]
-ORDERS_TABLE   = os.environ.get("ORDERS_TABLE", "")
-MODEL_BUCKET   = os.environ.get("MODEL_BUCKET", "")
-MODEL_KEY      = os.environ.get("MODEL_KEY", "recommendation/model.tar.gz")
+PRODUCTS_TABLE   = os.environ["PRODUCTS_TABLE"]
+ORDERS_TABLE     = os.environ.get("ORDERS_TABLE", "")
+MODEL_BUCKET     = os.environ.get("MODEL_BUCKET", "")
+MODEL_KEY        = os.environ.get("MODEL_KEY", "recommendation/model.tar.gz")
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 
 products_table = dynamodb.Table(PRODUCTS_TABLE)
 orders_table   = dynamodb.Table(ORDERS_TABLE) if ORDERS_TABLE else None
@@ -78,14 +85,15 @@ def load_model() -> dict:
             with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode="r:gz") as tar:
                 tar.extractall(tmpdir)
 
+            # Load raw numpy factor arrays — no implicit/OpenMP dependency
             _model_cache = {
-                "model":               joblib.load(os.path.join(tmpdir, "model.joblib")),
+                "user_factors":        np.load(os.path.join(tmpdir, "user_factors.npy")),
+                "item_factors":        np.load(os.path.join(tmpdir, "item_factors.npy")),
                 "customer_idx":        joblib.load(os.path.join(tmpdir, "customer_idx.joblib")),
-                "product_idx":         joblib.load(os.path.join(tmpdir, "product_idx.joblib")),
                 "reverse_product_idx": joblib.load(os.path.join(tmpdir, "reverse_product_idx.joblib")),
             }
         log.info("ALS model loaded — %d customers, %d products",
-                 len(_model_cache["customer_idx"]), len(_model_cache["product_idx"]))
+                 len(_model_cache["customer_idx"]), len(_model_cache["item_factors"]))
         return _model_cache
     except Exception as e:
         log.error("Failed to load ALS model: %s", e)
@@ -137,22 +145,23 @@ def als_recommend(customer_id: str, n: int, avg_spend: float | None) -> tuple[li
     if not artifacts:
         return [], "model_unavailable"
 
-    model            = artifacts["model"]
-    customer_idx     = artifacts["customer_idx"]
-    reverse_pid      = artifacts["reverse_product_idx"]
+    user_factors = artifacts["user_factors"]
+    item_factors = artifacts["item_factors"]
+    customer_idx = artifacts["customer_idx"]
+    reverse_pid  = artifacts["reverse_product_idx"]
 
-    fetch_n = min(n * 8, 200)  # fetch more, then filter by price
+    fetch_n = min(n * 8, 200)
 
     if customer_id in customer_idx:
-        uid = customer_idx[customer_id]
-        ids, scores = model.recommend(
-            uid, model.user_factors[uid],
-            N=fetch_n, filter_already_liked_items=True,
-        )
+        uid    = customer_idx[customer_id]
+        # Pure numpy dot product — no implicit/OpenMP needed
+        scores_all = item_factors @ user_factors[uid]
+        top_idx    = np.argsort(scores_all)[::-1][:fetch_n]
+        ids, scores = top_idx, scores_all[top_idx]
         strategy = "als_personalised"
     else:
         # Cold start: rank by item-factor norm (global popularity proxy)
-        norms      = np.linalg.norm(model.item_factors, axis=1)
+        norms      = np.linalg.norm(item_factors, axis=1)
         top_idx    = np.argsort(norms)[::-1][:fetch_n]
         ids, scores = top_idx, norms[top_idx]
         strategy   = "als_popular"
@@ -213,6 +222,45 @@ def als_recommend(customer_id: str, n: int, avg_spend: float | None) -> tuple[li
     return results, strategy
 
 
+# ── Claude explanation ───────────────────────────────────────────────────────
+
+def generate_explanation(recommendations: list, avg_spend: float | None, strategy: str) -> str | None:
+    if not ANTHROPIC_API_KEY or not _anthropic_available:
+        return None
+    try:
+        categories = list({r["category"] for r in recommendations if r.get("category")})[:3]
+        price_range = None
+        prices = [r["unit_price"] for r in recommendations if r.get("unit_price")]
+        if prices:
+            price_range = f"R${min(prices):.0f}–R${max(prices):.0f}"
+
+        context_parts = []
+        if avg_spend:
+            context_parts.append(f"average spend of R${avg_spend:.0f}/item")
+        if categories:
+            context_parts.append(f"interest in {', '.join(categories)}")
+        if price_range:
+            context_parts.append(f"price range {price_range}")
+
+        if strategy == "catalog_fallback":
+            prompt = "Write one friendly sentence (max 20 words) explaining that we're showing popular products while we learn their preferences."
+        elif strategy == "als_popular":
+            prompt = f"Write one friendly sentence (max 20 words) explaining we're showing trending products to a new customer. Context: {', '.join(context_parts) or 'new customer'}."
+        else:
+            prompt = f"Write one friendly sentence (max 20 words) explaining personalised product recommendations. Context: customer with {', '.join(context_parts) or 'purchase history'}."
+
+        client = _anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        msg = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=60,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return msg.content[0].text.strip()
+    except Exception as e:
+        log.warning("Explanation generation failed: %s", e)
+        return None
+
+
 # ── Lambda handler ───────────────────────────────────────────────────────────
 
 def lambda_handler(event, context):
@@ -254,15 +302,18 @@ def lambda_handler(event, context):
     for i, r in enumerate(recommendations):
         r["rank"] = i + 1
 
+    explanation = generate_explanation(recommendations, avg_spend, strategy)
+
     return {
         "statusCode": 200,
         "body": json.dumps(
             {
-                "customer_id":          customer_id,
-                "recommendations":      recommendations,
-                "count":                len(recommendations),
-                "strategy":             strategy,
-                "avg_spend_per_item":   round(avg_spend, 2) if avg_spend else None,
+                "customer_id":        customer_id,
+                "recommendations":    recommendations,
+                "count":              len(recommendations),
+                "strategy":           strategy,
+                "avg_spend_per_item": round(avg_spend, 2) if avg_spend else None,
+                "explanation":        explanation,
             },
             cls=DecimalEncoder,
         ),
