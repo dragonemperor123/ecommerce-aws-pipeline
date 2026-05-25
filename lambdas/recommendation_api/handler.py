@@ -140,7 +140,7 @@ def enrich_products(product_ids: list) -> dict:
 
 # ── ALS recommendations ──────────────────────────────────────────────────────
 
-def als_recommend(customer_id: str, n: int, avg_spend: float | None) -> tuple[list, str]:
+def als_recommend(customer_id: str, n: int, avg_spend: float | None, category_filter: str = "") -> tuple[list, str]:
     artifacts = load_model()
     if not artifacts:
         return [], "model_unavailable"
@@ -182,6 +182,12 @@ def als_recommend(customer_id: str, n: int, avg_spend: float | None) -> tuple[li
         item = meta.get(pid, {})
         price = float(item["unit_price"]) if item.get("unit_price") is not None else None
 
+        # Category filter
+        if category_filter:
+            item_cat = (item.get("category") or "").lower()
+            if category_filter not in item_cat:
+                continue
+
         # Price-affinity filter: keep products within ±60% of avg spend
         if avg_spend and price is not None:
             if not (avg_spend * 0.4 <= price <= avg_spend * 1.6):
@@ -200,7 +206,7 @@ def als_recommend(customer_id: str, n: int, avg_spend: float | None) -> tuple[li
         if len(results) >= n:
             break
 
-    # If price filter left too few results, relax and fill from the full candidate list
+    # If price filter left too few results, relax to 3× range and fill
     if len(results) < n:
         for c in candidates:
             if len(results) >= n:
@@ -209,12 +215,20 @@ def als_recommend(customer_id: str, n: int, avg_spend: float | None) -> tuple[li
             if any(r["product_id"] == pid for r in results):
                 continue
             item = meta.get(pid, {})
+            if category_filter:
+                item_cat = (item.get("category") or "").lower()
+                if category_filter not in item_cat:
+                    continue
+            price = float(item["unit_price"]) if item.get("unit_price") is not None else None
+            if avg_spend and price is not None:
+                if not (avg_spend * 0.2 <= price <= avg_spend * 3.0):
+                    continue
             results.append({
                 "product_id":  pid,
                 "score":       round(min(c["raw_score"], 0.99), 3),
                 "rank":        len(results) + 1,
                 "category":    item.get("category"),
-                "unit_price":  float(item["unit_price"]) if item.get("unit_price") is not None else None,
+                "unit_price":  price,
                 "stock_level": int(item["stock_level"]) if item.get("stock_level") is not None else None,
                 "source":      strategy,
             })
@@ -269,14 +283,15 @@ def lambda_handler(event, context):
     except json.JSONDecodeError:
         return {"statusCode": 400, "body": json.dumps({"error": "Invalid JSON body"}), "headers": CORS}
 
-    customer_id = body.get("customer_id")
-    n           = min(int(body.get("n", 5)), 20)
+    customer_id     = body.get("customer_id")
+    n               = min(int(body.get("n", 5)), 20)
+    category_filter = body.get("category", "").strip().lower().replace(" ", "_")
 
     if not customer_id:
         return {"statusCode": 400, "body": json.dumps({"error": "Provide customer_id"}), "headers": CORS}
 
     avg_spend     = get_customer_avg_spend(customer_id)
-    recommendations, strategy = als_recommend(customer_id, n, avg_spend)
+    recommendations, strategy = als_recommend(customer_id, n, avg_spend, category_filter)
 
     # Catalog fallback when model is unavailable or returned nothing
     if not recommendations:

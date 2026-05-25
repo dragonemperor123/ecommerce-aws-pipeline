@@ -215,7 +215,7 @@
       <span id="fetchedAt" style="font-size:0.72rem;color:var(--accent2);font-weight:500;letter-spacing:0;text-transform:none;"></span>
     </div>
     <p style="font-size:0.82rem;color:var(--muted);margin-bottom:16px;line-height:1.5;">
-      The Lambda looks up this customer's <strong style="color:var(--text)">real order history</strong> in DynamoDB, computes their average spend per item, then recommends products priced within ±50% of that figure. Pick a real customer below to see how the price band changes per person — a budget shopper and a luxury shopper get completely different recommendations.
+      The Lambda looks up this customer's <strong style="color:var(--text)">real order history</strong> in DynamoDB, computes their average spend per item, then recommends products priced within ±60% of that figure. Pick a real customer below to see how the price band changes per person — a budget shopper and a luxury shopper get completely different recommendations.
     </p>
     <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px;">
       <span style="font-size:0.75rem;color:var(--muted);align-self:center;margin-right:4px;">Real customers:</span>
@@ -312,6 +312,35 @@
 <script>
   const API = 'https://pnrzugwp32.execute-api.eu-north-1.amazonaws.com/prod/recommendations';
 
+  const PRODUCT_NAMES = {
+    toys:                  [[0,30,'Budget Toy Set'],[30,70,'Activity Play Set'],[70,999,'Premium RC Toy']],
+    health_beauty:         [[0,25,'Daily Skincare Kit'],[25,60,'Beauty Essentials Set'],[60,999,'Premium Beauty Bundle']],
+    furniture_decor:       [[0,40,'Decorative Accent'],[40,80,'Home Décor Set'],[80,999,'Statement Furniture Piece']],
+    garden_tools:          [[0,30,'Garden Hand Tool'],[30,70,'Garden Tool Set'],[70,999,'Pro Garden Kit']],
+    bed_bath_table:        [[0,40,'Bath Essentials Pack'],[40,80,'Bedroom Comfort Set'],[80,999,'Premium Linen Set']],
+    telephony:             [[0,50,'Phone Accessory'],[50,150,'Mobile Device Kit'],[150,999,'Smartphone Bundle']],
+    watches_gifts:         [[0,50,'Fashion Watch'],[50,150,'Gift Set'],[150,999,'Premium Timepiece']],
+    computers_accessories: [[0,50,'PC Accessory'],[50,150,'Computer Peripheral Kit'],[150,999,'Tech Bundle']],
+    sports_leisure:        [[0,40,'Sports Accessory'],[40,100,'Fitness Set'],[100,999,'Premium Sports Kit']],
+    housewares:            [[0,40,'Kitchen Essential'],[40,80,'Home Utility Set'],[80,999,'Premium Kitchenware']],
+    auto:                  [[0,50,'Car Accessory'],[50,150,'Auto Care Kit'],[150,999,'Premium Auto Set']],
+    books_general_interest:[[0,30,'Bestseller Book'],[30,60,'Book Collection'],[60,999,'Special Edition Set']],
+    cool_stuff:            [[0,40,'Novelty Item'],[40,80,'Lifestyle Gadget'],[80,999,'Premium Lifestyle Set']],
+    perfumery:             [[0,30,'Fragrance Sample Set'],[30,80,'Eau de Toilette'],[80,999,'Designer Perfume']],
+    office_furniture:      [[0,50,'Desk Organiser'],[50,150,'Office Furniture Piece'],[150,999,'Executive Office Set']],
+  };
+
+  function productLabel(rawCat, price) {
+    const key = (rawCat || '').toLowerCase().replace(/ /g, '_');
+    const tiers = PRODUCT_NAMES[key];
+    if (!tiers) {
+      return (rawCat || 'Product').replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+    }
+    const p = price || 0;
+    const tier = tiers.find(([lo, hi]) => p >= lo && p < hi) || tiers[tiers.length - 1];
+    return tier[2];
+  }
+
   async function fetchRecs() {
     const btn = document.getElementById('fetchBtn');
     const loading = document.getElementById('loading');
@@ -356,8 +385,9 @@
         catalog_fallback: '📦 Catalog browse',
       };
       const strategyLabel = strategyLabels[data.strategy] || data.strategy || 'Live';
-      const avgHint = data.avg_spend_per_item
-        ? ` · R$${(data.avg_spend_per_item * 0.4).toFixed(0)}–R$${(data.avg_spend_per_item * 1.6).toFixed(0)} price band`
+      const avgSpend = data.avg_spend_per_item;
+      const avgHint = avgSpend
+        ? ` · avg spend R$${avgSpend.toFixed(0)}/item · band R$${(avgSpend * 0.4).toFixed(0)}–R$${(avgSpend * 1.6).toFixed(0)}`
         : '';
       if (fetchedAt) fetchedAt.textContent = `${strategyLabel}${avgHint} · ${new Date().toLocaleTimeString()}`;
 
@@ -372,22 +402,40 @@
         }
       }
 
+      // Normalize scores to [1, 99]% relative to the top result (personalised only)
+      const persScores = data.strategy === 'als_personalised'
+        ? data.recommendations.map(r => r.score).filter(s => s != null)
+        : [];
+      const maxScore = persScores.length ? Math.max(...persScores) : 0;
+
       data.recommendations.forEach((r, i) => {
         const cat = (r.category || 'unknown').replace(/_/g, ' ');
         const price = r.unit_price != null ? `R$ ${r.unit_price.toFixed(2)}` : '—';
-        const score = r.score != null ? `${(r.score * 100).toFixed(0)}% match` : '';
+        const shortId = r.product_id ? r.product_id.substring(0, 8) + '…' : '';
+        let scoreHtml = '';
+        if (data.strategy === 'als_personalised' && r.score != null && maxScore > 0) {
+          const pct = Math.max(1, Math.round((r.score / maxScore) * 99));
+          scoreHtml = `<div style="font-size:0.78rem;color:var(--muted);min-width:64px;text-align:right;">${pct}% match</div>`;
+        }
         const sourceMap = { als_personalised: 'ALS', als_popular: 'Trending', catalog_fallback: 'Catalog', dynamodb_live: 'DynamoDB' };
         const sourceLabel = sourceMap[r.source] || r.source || 'live';
         const div = document.createElement('div');
         div.className = 'result-item';
         div.style.animationDelay = `${i * 60}ms`;
+        const name = productLabel(r.category, r.unit_price);
+        const stockVal = r.stock_level;
+        const stockHtml = stockVal != null && stockVal > 0
+          ? `<span style="font-size:0.68rem;color:var(--success);">✓ ${stockVal} in stock</span>`
+          : stockVal === 0
+            ? `<span style="font-size:0.68rem;color:#f87171;">Low stock</span>`
+            : '';
         div.innerHTML = `
           <div class="result-rank">#${i + 1}</div>
           <div class="result-info">
-            <div class="result-cat">${cat}</div>
-            <div class="result-id">${r.product_id}</div>
+            <div class="result-cat">${name}</div>
+            <div style="font-size:0.72rem;color:var(--muted);margin-top:2px;">${cat} · ${shortId} ${stockHtml}</div>
           </div>
-          ${score ? `<div style="font-size:0.78rem;color:var(--muted);min-width:70px;text-align:right;">${score}</div>` : ''}
+          ${scoreHtml}
           <div class="result-price">${price}</div>
           <div class="result-source">${sourceLabel}</div>
         `;
